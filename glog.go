@@ -43,6 +43,8 @@
 //		Logs are written to standard error instead of to files.
 //	-alsologtostderr=false
 //		Logs are written to standard error as well as to files.
+// 	-colorlogtostderr=false
+//      Color messages logged to stderr (if supported by terminal)
 //	-stderrthreshold=ERROR
 //		Log events at or above this severity are logged to standard
 //		error as well as to files.
@@ -112,6 +114,41 @@ var severityName = []string{
 	warningLog: "WARNING",
 	errorLog:   "ERROR",
 	fatalLog:   "FATAL",
+}
+
+const (
+	colorDefault = ""
+	colorRed     = "1"
+	colorGreen   = "2"
+	colorYellow  = "3"
+)
+
+var severityColor = []string{
+	infoLog:    colorDefault,
+	warningLog: colorYellow,
+	errorLog:   colorRed,
+	fatalLog:   colorRed,
+}
+
+var termSupportsColor = false
+
+func TermSupportsColor() bool {
+	termSupportsColor := false
+	term := os.Getenv("TERM")
+	if term != "" {
+		termSupportsColor = termSupportsColor ||
+			term == "xterm" ||
+			term == "xterm-color" ||
+			term == "xterm-256color" ||
+			term == "konsole" ||
+			term == "konsole-16color" ||
+			term == "konsole-256color" ||
+			term == "screen" ||
+			term == "screen-256color" ||
+			term == "linux" ||
+			term == "cygwin"
+	}
+	return termSupportsColor
 }
 
 // get returns the value of the severity.
@@ -398,10 +435,13 @@ type flushSyncWriter interface {
 func init() {
 	flag.BoolVar(&logging.toStderr, "logtostderr", false, "log to standard error instead of files")
 	flag.BoolVar(&logging.alsoToStderr, "alsologtostderr", false, "log to standard error as well as files")
+	flag.BoolVar(&logging.colorToStderr, "colorlogtostderr", false, "Color messages logged to stderr (if supported by terminal)")
 	flag.Var(&logging.verbosity, "v", "log level for V logs")
 	flag.Var(&logging.stderrThreshold, "stderrthreshold", "logs at or above this threshold go to stderr")
 	flag.Var(&logging.vmodule, "vmodule", "comma-separated list of pattern=N settings for file-filtered logging")
 	flag.Var(&logging.traceLocation, "log_backtrace_at", "when logging hits line file:N, emit a stack trace")
+
+	termSupportsColor = TermSupportsColor()
 
 	// Default stderrThreshold is ERROR.
 	logging.stderrThreshold = errorLog
@@ -420,8 +460,9 @@ type loggingT struct {
 	// Boolean flags. Not handled atomically because the flag.Value interface
 	// does not let us avoid the =true, and that shorthand is necessary for
 	// compatibility. TODO: does this matter enough to fix? Seems unlikely.
-	toStderr     bool // The -logtostderr flag.
-	alsoToStderr bool // The -alsologtostderr flag.
+	toStderr      bool // The -logtostderr flag.
+	alsoToStderr  bool // The -alsologtostderr flag.
+	colorToStderr bool // The -colorlogtostderr flag.
 
 	// Level flag. Handled atomically.
 	stderrThreshold severity // The -stderrthreshold flag.
@@ -667,6 +708,16 @@ func (l *loggingT) printWithFileLine(s severity, file string, line int, alsoToSt
 	l.output(s, buf, file, line, alsoToStderr)
 }
 
+func (l *loggingT) outputStderr(s severity, data []byte) {
+	if termSupportsColor && l.colorToStderr {
+		os.Stderr.Write([]byte(fmt.Sprintf("\033[0;3%sm", severityColor[s])))
+		os.Stderr.Write(data)
+		os.Stderr.Write([]byte("\033[m"))
+	} else {
+		os.Stderr.Write(data)
+	}
+}
+
 // output writes the data to the log files and releases the buffer.
 func (l *loggingT) output(s severity, buf *buffer, file string, line int, alsoToStderr bool) {
 	l.mu.Lock()
@@ -680,14 +731,14 @@ func (l *loggingT) output(s severity, buf *buffer, file string, line int, alsoTo
 		os.Stderr.Write([]byte("ERROR: logging before flag.Parse: "))
 		os.Stderr.Write(data)
 	} else if l.toStderr {
-		os.Stderr.Write(data)
+		l.outputStderr(s, data)
 	} else {
 		if alsoToStderr || l.alsoToStderr || s >= l.stderrThreshold.get() {
-			os.Stderr.Write(data)
+			l.outputStderr(s, data)
 		}
 		if l.file[s] == nil {
 			if err := l.createFiles(s); err != nil {
-				os.Stderr.Write(data) // Make sure the message appears somewhere.
+				l.outputStderr(s, data) // Make sure the message appears somewhere.
 				l.exit(err)
 			}
 		}
